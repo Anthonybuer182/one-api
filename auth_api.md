@@ -50,23 +50,24 @@
 
 ## 2. 角色与三种凭据
 
-**角色（3 个程序）**：
+**角色（4 个参与方）**：
 
-```
-pi 客户端（用户电脑） ←→ one-api 改造版（你的服务器） ←→ TokenHub（腾讯云）
-                              ↕
-                        钉钉开放平台（扫码认证）
+```mermaid
+flowchart LR
+    pi["pi 客户端（用户电脑）"] <--> oneapi["one-api 改造版（你的服务器）"]
+    oneapi <--> th["TokenHub（腾讯云）"]
+    dd["钉钉开放平台（扫码认证）"] <--> oneapi
 ```
 
 **三种 Key，谁持有谁：**
 
-```
-Key① one-api 令牌        sk-xxx        签发方: one-api          存放: 客户端 auth.json
-Key② TokenHub 真 Key     sk-tp-NNN     申请方: 你在控制台批量创建   存放: one-api 渠道配置（DB）
-Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        存放: one-api 环境变量
+| Key | 形态 | 来源 | 存放 |
+|---|---|---|---|
+| ① one-api 令牌 | `sk-xxx` | 签发方: one-api | 客户端 auth.json |
+| ② TokenHub 真 Key | `sk-tp-NNN` | 你在控制台批量创建 | one-api 渠道配置（DB） |
+| ③ 钉钉 AppSecret | `secret888` | 钉钉开放平台 | one-api 环境变量 |
 
 用户只见 Key①。Key②③ 永不出服务器。
-```
 
 **映射关系的表达（one-api 分组机制，不写映射表）**：
 
@@ -81,45 +82,53 @@ Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        
 
 ## 3. 总体架构
 
-```
-┌───────────────────────────────────────────────────────┐
-│ pi 客户端                                              │
-│  ┌───────────────┐        ┌────────────────────────┐  │
-│  │ TokenHubOAuth │        │ LLM 请求                │  │
-│  │ (OAuthAuth)   │        │ baseUrl=本服务域名/v1    │  │
-│  └──────┬────────┘        │ Bearer sk-xxx (Key①)   │  │
-│  ┌──────▼────────┐        └───────────┬────────────┐  │
-│  │ loopback 回调  │        ┌───────────▼────────────┐  │
-│  │ 127.0.0.1:rp  │        │ auth.json              │  │
-│  └───────────────┘        │ {type:oauth,access:sk} │  │
-└─────────┬─────────────────────────────┬─────────────────┘
-          │浏览器                        │ Bearer Key①
-          ▼                            ▼
-┌───────────────────────────────────────────────────────┐
-│ one-api 改造版  https://tokenhub.example.com           │
-│                                                       │
-│ 【新增】钉钉登录模块          【现成】                   │
-│  ├ GET  /api/oauth/dingtalk    ├ /v1/chat/completions │
-│  ├ GET  /api/oauth/dingtalk/   ├ 令牌系统              │
-│  │        callback             ├ 渠道路由（按 group）   │
-│  ├ POST /api/oauth/dingtalk/   ├ 额度/计费/日志         │
-│  │        exchange             └ 管理后台              │
-│  ├ 换 unionId → 建用户                                 │
-│  ├ 号池占 Key → 建渠道(Type=OpenAI) → InitChannelCache │
-│  ├ 回填额度 + 设用户分组                                │
-│  └ 302 回客户端带一次性短码                             │
-│                                                       │
-│ 数据库（现成 + 变更）                                    │
-│  users / tokens / channels / abilities（现成）          │
-│  users 表：新增 dingtalk_id 列（照 lark_id 模式）        │
-│  oauth_state   state → redirect_uri / 短码（新增）       │
-│  key_pool      号池: tokenhub_key | status（新增）       │
-└───────────────────────────┬───────────────────────────┘
-                            │ Bearer sk-tp-NNN (Key②)
-                            ▼
-                    TokenHub（OpenAI 兼容端点）
-                            │
-                    腾讯云按 Key 统计/独占额度
+```mermaid
+flowchart TB
+    subgraph client["pi 客户端"]
+        direction TB
+        oauth["TokenHubOAuth (OAuthAuth)"]
+        loopback["loopback 回调<br/>127.0.0.1:rp"]
+        llm["LLM 请求<br/>baseUrl=本服务域名/v1<br/>Bearer sk-xxx (Key①)"]
+        authjson["auth.json<br/>{type:oauth, access:sk}"]
+        oauth --> loopback
+        llm --- authjson
+    end
+
+    subgraph oneapi["one-api 改造版 https://oneapi.example.com"]
+        direction TB
+        subgraph mod["【新增】钉钉登录模块"]
+            direction TB
+            ep1["GET /api/oauth/dingtalk"]
+            ep2["GET /api/oauth/dingtalk/callback"]
+            ep3["POST /api/oauth/dingtalk/exchange"]
+            inner["换 unionId → 建用户<br/>号池占 Key → 建渠道(Type=OpenAI) → InitChannelCache<br/>回填额度 + 设用户分组<br/>302 回客户端带一次性短码"]
+            ep1 ~~~ ep2 ~~~ ep3 ~~~ inner
+        end
+        subgraph ready["【现成】"]
+            direction TB
+            r1["/v1/chat/completions"]
+            r2["令牌系统"]
+            r3["渠道路由（按 group）"]
+            r4["额度/计费/日志"]
+            r5["管理后台"]
+        end
+        subgraph db["数据库（现成 + 变更）"]
+            direction TB
+            d1["users / tokens / channels / abilities（现成）"]
+            d2["users 表：新增 dingtalk_id 列（照 lark_id 模式）"]
+            d3["oauth_state：state → redirect_uri / 短码（新增）"]
+            d4["key_pool：号池 tokenhub_key、status（新增）"]
+        end
+        mod ~~~ ready ~~~ db
+    end
+
+    subgraph tokenhub["TokenHub（OpenAI 兼容端点）"]
+        cloud["腾讯云按 Key 统计/独占额度"]
+    end
+
+    oauth -- "浏览器" --> mod
+    llm -- "Bearer Key①" --> ready
+    oneapi -- "Bearer sk-tp-NNN (Key②)" --> tokenhub
 ```
 
 注意架构里的隐藏依赖：**路由数据源是 `abilities` 表 + 进程内 `group2model2channels` 缓存**，不是 `channels` 表本身。所以建渠道必须同步建 Ability 并刷新缓存（见 4.1）。
@@ -128,42 +137,35 @@ Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        
 
 ## 4. 登录流程（逐请求）
 
-```
-客户端           浏览器           one-api             钉钉
-  │①开临时回调服务器 │                │                  │
-  │ 127.0.0.1:53721 │                │                  │
-  │ path=/oauth/callback/<uuid>      │                  │
-  │②notify 打开浏览器│               │                  │
-  │───────────────►│ GET /api/oauth/dingtalk           │
-  │                │  ?redirect_uri=http://127.0.0.1:53721/oauth/callback/<uuid>
-  │                │               │ 校验 redirect_uri 前缀必须是 http://127.0.0.1:
-  │                │               │ 生成 state，存 state → redirect_uri（5min）
-  │                │◄── 302 ───────│                  │
-  │                │   login.dingtalk.com/oauth2/auth │
-  │                │   ?client_id=AppKey               │
-  │                │   &redirect_uri=本服务域名/api/oauth/dingtalk/callback
-  │                │   &response_type=code&scope=openid│
-  │                │   &prompt=consent&state=xyz789    │
-  │                │──── 扫码确认 ──────────────────────►│
-  │                │◄── 302 ?authCode=xxx&state=xyz789 ─│
-  │                │  （失败时 ?error=yyy&state=xyz789，回调必须处理 error 分支）
-  │                │───►│ /api/oauth/dingtalk/callback  │
-  │                │    │③校验 state（存在+未过期，用后即删）
-  │                │    │④POST api.dingtalk.com         │
-  │                │    │  /v1.0/oauth2/userAccessToken │
-  │                │    │  {clientId, clientSecret,     │
-  │                │    │   code, grantType:"authorization_code"}
-  │                │    │⑤GET /v1.0/contact/users/me    │
-  │                │    │  header: x-acs-dingtalk-access-token
-  │                │    │  → unionId, nick              │
-  │                │    │⑥自动开通（见 4.1）              │
-  │                │    │⑦生成一次性短码（32 字符，5min）  │
-  │◄── ⑧302 redirect_uri?code=shortCode ─────────────── │
-  │⑨临时服务器收下 code  │                             │
-  │  POST /api/oauth/dingtalk/exchange {code:shortCode} │
-  │  → {token: "sk-xxx"}（短码用后即删）                 │
-  │  存 auth.json，关闭临时服务器                        │
-  │  「登录成功」     │                │                  │
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant B as 浏览器
+    participant S as one-api
+    participant D as 钉钉
+
+    Note over C: ① 开临时回调服务器 127.0.0.1:53721<br/>path=/oauth/callback/{uuid}
+    Note over C: ② notify 打开浏览器
+    B->>S: GET 本服务域名/api/oauth/dingtalk<br/>?redirect_uri=http://127.0.0.1:53721/oauth/callback/{uuid}
+    Note over S: 校验 redirect_uri：用 url.Parse 取 Host<br/>必须是 127.0.0.1（不能只做字符串前缀匹配）
+    Note over S: 生成 state，存 state → redirect_uri（5min）
+    S-->>B: 302 login.dingtalk.com/oauth2/auth<br/>?client_id=AppKey<br/>&redirect_uri=本服务域名/api/oauth/dingtalk/callback<br/>&response_type=code&scope=openid<br/>&prompt=consent&state=xyz789
+    B->>D: 扫码确认
+    D-->>B: 302 ?authCode=xxx&state=xyz789
+    Note over B,D: 失败时 ?error=yyy&state=xyz789，回调必须处理 error 分支
+    B->>S: GET 本服务域名/api/oauth/dingtalk/callback<br/>?authCode=xxx&state=xyz789
+    Note over S: ③ 校验 state（存在+未过期，用后即删）
+    S->>D: ④ POST api.dingtalk.com/v1.0/oauth2/userAccessToken<br/>{clientId, clientSecret, code, grantType:"authorization_code"}
+    S->>D: ⑤ GET /v1.0/contact/users/me<br/>header: x-acs-dingtalk-access-token<br/>→ unionId, nick
+    Note over S: ⑥ 自动开通（见 4.1）
+    Note over S: ⑦ 生成一次性短码（32 字符，5min）
+    S-->>B: ⑧ 302 http://127.0.0.1:53721/oauth/callback/{uuid}<br/>?code=shortCode（= 步骤②客户端传来的 redirect_uri）
+    B->>C: 浏览器跟随 302<br/>GET /oauth/callback/{uuid}?code=shortCode
+    Note over C: ⑨ 临时服务器收下 code<br/>回「登录成功」页，浏览器使命结束
+    C->>S: ⑩ POST /api/oauth/dingtalk/exchange<br/>{"code": "shortCode"}<br/>（pi 进程直连，不经浏览器）
+    Note over S: 查库：存在、未过期、未用过<br/>→ 用完立即删（一次性）
+    S-->>C: {"token": "sk-xxx"}
+    Note over C: 写入 auth.json → 登录完成 ✅<br/>关闭临时服务器
 ```
 
 > 短码放在 `code` 参数位，是因为 pi 的 `startOAuthCallbackServer` 的 `complete` 回调签名是 `(code: string) => Promise<T>`，只交出 `code`，不交出完整 URL（`packages/ai/src/auth/oauth/callback-server.ts:28`、`:100-107`）。v1 里“解析完整 URL 拿 token”的写法在现有 API 下拿不到。
@@ -194,7 +196,7 @@ Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        
        WHERE id = (SELECT id FROM (SELECT id FROM key_pool
                    WHERE status='未分配' ORDER BY id LIMIT 1) t)
          AND status='未分配'
-     影响行数 0 → 号池空：登录失败，返回「额度号池耗尽，请联系管理员」，并发告警（webhook 可选）
+     影响行数 0 → 先重试一次（并发抢同一行会失败）；仍为 0 才判定号池空：登录失败，返回「额度号池耗尽，请联系管理员」，并触发告警（webhook 可选）
 5. 建渠道
      channel := model.Channel{
        Type:    channeltype.OpenAI,          // 必填，否则 relay 不认
@@ -216,8 +218,9 @@ Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        
        → 取 token.Key（char(48)，明文，无 sk- 前缀）
      若不存在（用户删过）→ 新建 Token{UserId, Name:"default", ExpiredTime:-1,
        RemainQuota:-1, UnlimitedQuota:true, Key: random.GenerateKey()} 后 Insert()
-8. 写短码：oauth_state 表新增一行（code=32 位随机串, tool='short_code',
-   user_id=?, expire=now+5min）→ 302 redirect_uri?code=<shortCode>
+8. 写短码：oauth_state 表新增一行（code=32 位随机串, type='short_code',
+   user_id=?, expire=now+5min）→ 302 回 redirect_uri?code=<shortCode>
+   （此 redirect_uri = 客户端 loopback 回调地址，非本服务域名）
 ```
 
 ### 4.2 兑换接口
@@ -238,27 +241,24 @@ body: { "code": "<shortCode>" }
 
 ## 5. 对话流程（逐请求）
 
-```
-客户端                                one-api                TokenHub
-  │ POST /v1/chat/completions           │                      │
-  │ Bearer sk-xxx (Key①)                │                      │
-  │ {"model":"deepseek-v3",...}         │                      │
-  │────────────────────────────────────►│                      │
-  │                    ①TokenAuth: 去 sk- 前缀 → ValidateUserToken
-  │                        （Token.Key 是纯字母数字，不会被 '-' 截断）
-  │                    ②Distribute: CacheGetUserGroup(张三)=user-3
-  │                        → CacheGetRandomSatisfiedChannel(user-3, deepseek-v3)
-  │                        → 命中渠道 user-3-tokenhub
-  │                    ③SetupContextForSelectedChannel:
-  │                        Authorization 换成 Bearer sk-tp-001
-  │                        BaseURL 换成 TokenHub 端点
-  │                                     │─────────────────────►│
-  │                                     │      腾讯云认 Key②    │
-  │◄──────────── SSE 流式透传 ──────────────────────────────────│
-  │                    ④PreConsume/PostConsume：扣内部额度并记账
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant S as one-api
+    participant T as TokenHub
+
+    C->>S: POST /v1/chat/completions<br/>Bearer sk-xxx (Key①)<br/>{"model":"deepseek-v3",...}
+    Note over S: ① TokenAuth：去 sk- 前缀 → ValidateUserToken<br/>（Token.Key 是纯字母数字，不会被 '-' 截断）
+    Note over S: ② Distribute：CacheGetUserGroup(张三)=user-3<br/>→ CacheGetRandomSatisfiedChannel(user-3, deepseek-v3)<br/>→ 命中渠道 user-3-tokenhub
+    Note over S: ③ SetupContextForSelectedChannel：<br/>Authorization 换成 Bearer sk-tp-001<br/>BaseURL 换成 TokenHub 端点
+    S->>T: POST /v1/chat/completions（Bearer Key②）
+    Note over T: 腾讯云认 Key②
+    T-->>S: SSE 流式回复
+    S-->>C: 透传回复
+    Note over S: ④ PreConsume/PostConsume：扣内部额度并记账
 ```
 
-理解要点：换头在 one-api 内部完成；客户端两跳都是 Key①，Key② 只出现在 one-api→TokenHub 这一跳，所以腾讯云控制台按 Key 看到的就是各人独立用量。
+理解要点：换头在 one-api 内部完成；客户端全程只见 Key①，Key② 只出现在 one-api→TokenHub 这一跳，所以腾讯云控制台按 Key 看到的就是各人独立用量。
 
 ---
 
@@ -289,9 +289,9 @@ POST /api/oauth/dingtalk/exchange     短码换令牌（挂 CriticalRateLimit）
 
 ```
 DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET
-TOKENHUB_PUBLIC_URL=https://tokenhub.example.com     // 对外域名，用于拼 callback / 兑换地址
-TOKENHUB_UPSTREAM_URL=https://tokenhub.example.com   // 渠道 BaseURL：主机根地址，不要带 /v1，末尾也不要带 /
-                                                     // one-api 自己会拼 /v1/chat/completions
+TOKENHUB_PUBLIC_URL=https://oneapi.example.com       // 对外域名（= 本服务域名），用于拼 callback / 兑换地址
+TOKENHUB_UPSTREAM_URL=https://tokenhub.tencent.example   // 渠道 BaseURL：腾讯 TokenHub 端点的主机根地址，
+                                                     // 不要带 /v1，末尾也不要带 /，one-api 自己会拼 /v1/chat/completions
 TOKENHUB_MODELS=deepseek-v3,kimi-k2,...              // 必须与 TokenHub 模型名一致
 TOKENHUB_USER_QUOTA=100000000                        // 新用户内部额度
 ```
@@ -301,7 +301,8 @@ TOKENHUB_USER_QUOTA=100000000                        // 新用户内部额度
 
 ### 6.2 客户端侧（TypeScript，1 个新文件）
 
-`tokenhub-oauth.ts`，照抄 `packages/ai/src/auth/oauth/openrouter.ts`：
+`tokenhub-oauth.ts`，照抄 `packages/ai/src/auth/oauth/openrouter.ts`。
+（下文 `{TOKENHUB}` 均指 TOKENHUB_PUBLIC_URL，即本服务域名）
 
 ```
 login()
@@ -330,8 +331,8 @@ OpenAI 兼容网关、渠道路由、额度计费、管理后台（one-api 现�
 ③ 基础信息 → 凭证：拿 Client ID(AppKey) / Client Secret
 ④ 开发配置 → 权限管理：申请 Contact.User.Read
 ⑤ 开发配置 → 安全设置 → 重定向 URL：
-     https://tokenhub.example.com/api/oauth/dingtalk/callback
-     （本地调试另加 http://localhost:xxxx）
+     https://oneapi.example.com/api/oauth/dingtalk/callback
+     （域名即 TOKENHUB_PUBLIC_URL 的值；本地调试另加 http://localhost:xxxx）
 ⑥ 应用发布 → 版本管理与发布 → 创建新版本 → 发布（未发布扫码不生效）
 ```
 
@@ -358,7 +359,7 @@ OpenAI 兼容网关、渠道路由、额度计费、管理后台（one-api 现�
 
 | 风险 | 防护 | 实现位置 |
 |---|---|---|
-| 伪造 redirect_uri 窃取令牌 | 只允许 `http://127.0.0.1:` 前缀 | dingtalk.go 入口校验 |
+| 伪造 redirect_uri 窃取令牌 | `url.Parse` 后校验 `Host` 为 `127.0.0.1`（**不能**只做字符串前缀匹配：`http://127.0.0.1:1@evil.com/` 能通过前缀检查，真实 Host 是 evil.com） | dingtalk.go 入口校验 |
 | state 伪造 / 重放 | 随机 16 字节、5 分钟过期、用后即删 | oauth_state 表 |
 | authCode 重放 | 钉钉原生一次性 + 5 分钟 | 钉钉侧保证 |
 | 短码重放 / 泄露 | 32 字符随机、一次性、5 分钟过期；兑换接口 `CriticalRateLimit()` | oauth_state + exchange |
