@@ -10,8 +10,9 @@
 
 - P2-9 更正：未知分组倍率 `GetGroupRatio` 查不到时**回退为 1**（不是 0，见 `relay/billing/ratio/group.go` 的 `GetGroupRatio`），内部计费正常；代价是每个请求打一条 `SysError("group ratio not found: ...")`
 - P2-9 补充：不要为了消日志把 `user-*` 批量加进「分组倍率」——`controller/group.go` 的 `GetGroups()` 直接返回 `GroupRatio` 的 key，后台渠道编辑页的分组下拉会被上百个内部组名污染（详见第 8 节脚注）
-- P1-6 更正：one-api 现有 OAuth 路由全是静态段（`/oauth/github`、`/oauth/lark` 等，`router/api.go` L25-31），**不存在** `:provider` 通配，新增静态路由无 gin 冲突，v3 的兼容兜底作废
+- P1-6 更正：one-api 现有 OAuth 路由全是静态段（`/oauth/github`、`/oauth/lark` 等，在 `router/api.go` 的 `SetApiRouter()` 里逐个注册），**不存在** `:provider` 通配，新增静态路由无 gin 冲突，v3 的兼容兜底作废
 - 新增：`/callback` 与 `/exchange` 都要挂 `middleware.CriticalRateLimit()`，与现有 OAuth 路由一致；callback 每次会向钉钉发起 2 次 HTTP 调用，不限制等于对外开放一个可刷的上游调用入口
+- 新增：`TOKENHUB_UPSTREAM_URL` 明确填**主机根地址、不带 `/v1`**（one-api 的 OpenAI 渠道自己拼 `/v1/chat/completions`，源码 `relay/adaptor/openai/helper.go` 的 `GetFullRequestURL` 对 OpenAI 类型是 `baseURL + requestURL` 直拼）；它与客户端 `toAuth()` 里带 `/v1` 的 `baseUrl` 是两个不同的值。行号引用改为函数名（`SetApiRouter()`），避免上游改行号后失效
 
 **v3 修订**（补上 v2 中会导致流程跑不通的遗漏，均对照 one-api main 分支源码核验）：
 
@@ -199,7 +200,7 @@ Key③ 钉钉 AppSecret      secret888     签发方: 钉钉开放平台        
        Type:    channeltype.OpenAI,          // 必填，否则 relay 不认
        Status:  model.ChannelStatusEnabled,
        Name:    fmt.Sprintf("user-%d-tokenhub", user.Id),
-       BaseURL: &TOKENHUB_UPSTREAM_URL,
+       BaseURL: &upstreamURL,                // 主机根地址，不带 /v1（one-api 自己拼 /v1/…）
        Key:     poolKey,                     // sk-tp-NNN
        Models:  TOKENHUB_MODELS,             // 逗号分隔，必须与 TokenHub 模型名一致
        Group:   user.Group,
@@ -282,17 +283,21 @@ GET  /api/oauth/dingtalk/callback     钉钉回调（挂 CriticalRateLimit）
 POST /api/oauth/dingtalk/exchange     短码换令牌（挂 CriticalRateLimit）
 ```
 
-> 与现有 OAuth 路由平级添加即可：one-api 的 `/oauth/github`、`/oauth/oidc`、`/oauth/lark`、`/oauth/wechat` 都是静态路径（`router/api.go` L25-31），没有 `:provider` 通配，不存在 gin 路由冲突。
+> 与现有 OAuth 路由平级添加即可：one-api 的 `/oauth/github`、`/oauth/oidc`、`/oauth/lark`、`/oauth/wechat` 都是静态路径（在 `router/api.go` 的 `SetApiRouter()` 里逐个注册），没有 `:provider` 通配，不存在 gin 路由冲突。
 
 环境变量：
 
 ```
 DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET
-TOKENHUB_PUBLIC_URL=https://tokenhub.example.com    // 拼 callback 地址
-TOKENHUB_UPSTREAM_URL=https://<TokenHub OpenAI 兼容端点>
-TOKENHUB_MODELS=deepseek-v3,kimi-k2,...             // 必须与 TokenHub 模型名一致
-TOKENHUB_USER_QUOTA=100000000                       // 新用户内部额度
+TOKENHUB_PUBLIC_URL=https://tokenhub.example.com     // 对外域名，用于拼 callback / 兑换地址
+TOKENHUB_UPSTREAM_URL=https://tokenhub.example.com   // 渠道 BaseURL：主机根地址，不要带 /v1，末尾也不要带 /
+                                                     // one-api 自己会拼 /v1/chat/completions
+TOKENHUB_MODELS=deepseek-v3,kimi-k2,...              // 必须与 TokenHub 模型名一致
+TOKENHUB_USER_QUOTA=100000000                        // 新用户内部额度
 ```
+
+> `TOKENHUB_UPSTREAM_URL` 与客户端 `toAuth()` 里的 `baseUrl` 不是同一个值：渠道 BaseURL 填根地址（不带 `/v1`），填成 `.../v1` 会请求到 `/v1/v1/chat/completions`，末尾多一个 `/` 会拼出 `//v1/...`（多数网关不容忍）；客户端 `baseUrl` 用 `${TOKENHUB}/v1`。
+> Go 侧构造渠道时 `BaseURL: &upstreamURL` 必须取**变量地址**（`&os.Getenv(...)` 编译不过），所以在 `main.go` 读完环境变量后存成包级变量。
 
 ### 6.2 客户端侧（TypeScript，1 个新文件）
 
