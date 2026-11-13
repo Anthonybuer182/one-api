@@ -431,3 +431,5 @@ OpenAI 兼容网关、渠道路由、额度计费、管理后台（one-api 现�
 ```
 
 v4 定稿。可落地的最小改造集：`model/user.go` 加列、`key_pool`、`oauth_state`、`dingtalk.go`、`router/api.go` 3 条路由（均带 `CriticalRateLimit`）、`tokenhub-oauth.ts`。
+
+![alt text](image.png)
